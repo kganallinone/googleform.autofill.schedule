@@ -31,6 +31,7 @@ interface ScheduleResult {
   message: string;
   timeTaken: number;
   timeTakenFormatted: string;
+  timestamp?: string; // Added timestamp field
 }
 
 interface FormStatus {
@@ -66,6 +67,24 @@ function formatTime(milliseconds: number): string {
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Format date to M/DD/YYYY HH:mm:ss AM/PM
+ */
+function formatTimestamp(date: Date): string {
+  const month = date.getMonth() + 1;
+  const day = String(date.getDate()).padStart(2, "0");
+  const year = date.getFullYear();
+  let hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+
+  hours = hours % 12;
+  hours = hours ? hours : 12; // the hour '0' should be '12'
+
+  return `${month}/${day}/${year} ${hours}:${minutes}:${seconds} ${ampm}`;
 }
 
 /**
@@ -458,6 +477,7 @@ async function submitSingleSchedule(
   scheduleIndex: number,
 ): Promise<ScheduleResult> {
   const startTime = Date.now();
+  const submissionTime = new Date();
 
   try {
     console.log(`[Schedule ${scheduleIndex}] Loading form...`);
@@ -491,6 +511,7 @@ async function submitSingleSchedule(
         timeTaken,
         timeTakenFormatted: formatTime(timeTaken),
         scheduleIndex,
+        timestamp: formatTimestamp(submissionTime),
       };
     }
 
@@ -503,6 +524,7 @@ async function submitSingleSchedule(
         timeTaken,
         timeTakenFormatted: formatTime(timeTaken),
         scheduleIndex,
+        timestamp: formatTimestamp(submissionTime),
       };
     }
 
@@ -567,6 +589,7 @@ async function submitSingleSchedule(
         timeTaken,
         timeTakenFormatted: formatTime(timeTaken),
         scheduleIndex,
+        timestamp: formatTimestamp(submissionTime),
       };
     }
 
@@ -645,6 +668,7 @@ async function submitSingleSchedule(
           timeTaken,
           timeTakenFormatted: formatTime(timeTaken),
           scheduleIndex,
+          timestamp: formatTimestamp(submissionTime),
         };
       }
     }
@@ -660,6 +684,7 @@ async function submitSingleSchedule(
       timeTaken,
       timeTakenFormatted: formatTime(timeTaken),
       scheduleIndex,
+      timestamp: formatTimestamp(submissionTime),
     };
   } catch (error: any) {
     console.error(`[Schedule ${scheduleIndex}] Error:`, error);
@@ -672,6 +697,7 @@ async function submitSingleSchedule(
       timeTaken,
       timeTakenFormatted: formatTime(timeTaken),
       scheduleIndex,
+      timestamp: formatTimestamp(submissionTime),
     };
   }
 }
@@ -916,6 +942,8 @@ export async function POST(request: Request) {
         message: result.message,
 
         timeTaken: result.timeTakenFormatted,
+
+        timestamp: result.timestamp, // Added timestamp to single form response
       },
       {
         status: result.success ? 200 : 500,

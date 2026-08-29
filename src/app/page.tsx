@@ -19,6 +19,7 @@ import {
   History,
   ChevronDown,
   ChevronUp,
+  Clock,
 } from "lucide-react";
 
 interface Schedule {
@@ -41,6 +42,7 @@ interface SubmissionResponse {
     timeTaken: number;
     timeTakenFormatted: string;
     scheduleIndex: number;
+    timestamp?: string; // Added timestamp field
   }>;
   totalTime: string;
   averageTime: string;
@@ -72,6 +74,7 @@ interface ActivityLog {
       timeTakenMs: number;
       intervalToNext?: string;
       intervalToNextMs?: number;
+      timestamp?: string; // Added timestamp field
     }>;
   };
 }
@@ -304,6 +307,7 @@ export default function ScheduleManager() {
       message: string;
       timeTaken?: number;
       timeTakenFormatted?: string;
+      timestamp?: string;
     }>;
   }>({
     current: 0,
@@ -545,7 +549,12 @@ export default function ScheduleManager() {
   const submitSingleSchedule = async (
     schedule: Schedule,
     index: number,
-  ): Promise<{ success: boolean; message: string; timeTaken: number }> => {
+  ): Promise<{
+    success: boolean;
+    message: string;
+    timeTaken: number;
+    timestamp?: string;
+  }> => {
     const startTime = performance.now();
 
     try {
@@ -574,6 +583,7 @@ export default function ScheduleManager() {
         success: data.success && data.results[0]?.success === true,
         message: data.results[0]?.message || data.message || "Submitted",
         timeTaken,
+        timestamp: data.results[0]?.timestamp,
       };
     } catch (error) {
       const endTime = performance.now();
@@ -611,6 +621,7 @@ export default function ScheduleManager() {
       message: string;
       timeTaken?: number;
       timeTakenFormatted?: string;
+      timestamp?: string;
     }> = [];
     let successCount = 0;
     let failureCount = 0;
@@ -635,6 +646,7 @@ export default function ScheduleManager() {
         message: result.message,
         timeTaken: timeTaken,
         timeTakenFormatted: timeTakenFormatted,
+        timestamp: result.timestamp,
       });
 
       if (result.success) {
@@ -698,6 +710,7 @@ export default function ScheduleManager() {
         timeTakenMs: result.timeTaken || 0,
         intervalToNext: intervalToNextFormatted,
         intervalToNextMs: intervalToNext,
+        timestamp: result.timestamp,
       };
     });
 
@@ -889,7 +902,7 @@ export default function ScheduleManager() {
                   {/* Show submission details with intervals */}
                   {log.submissionDetails && log.type === "submission" && (
                     <div className="mt-3">
-                      <div className="flex gap-4 text-xs mb-2">
+                      <div className="flex gap-4 text-xs mb-2 flex-wrap">
                         <span className="font-medium">
                           Total Time:{" "}
                           <span className="text-green-700">
@@ -914,6 +927,7 @@ export default function ScheduleManager() {
                               <th className="px-2 py-1 text-right">
                                 Interval to Next
                               </th>
+                              <th className="px-2 py-1 text-left">Timestamp</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -940,6 +954,9 @@ export default function ScheduleManager() {
                                   </td>
                                   <td className="px-2 py-1 text-right font-mono text-gray-500">
                                     {item.intervalToNext || "—"}
+                                  </td>
+                                  <td className="px-2 py-1 text-left text-xs text-gray-500">
+                                    {item.timestamp || "—"}
                                   </td>
                                 </tr>
                               ),
@@ -1009,11 +1026,12 @@ export default function ScheduleManager() {
 
             {/* Enhanced results with time intervals */}
             <div className="mt-3 max-h-48 overflow-y-auto">
-              <div className="grid grid-cols-12 gap-1 text-xs font-semibold text-gray-500 mb-1 px-1">
+              <div className="grid grid-cols-13 gap-1 text-xs font-semibold text-gray-500 mb-1 px-1">
                 <span className="col-span-1">#</span>
-                <span className="col-span-5">Schedule</span>
+                <span className="col-span-4">Schedule</span>
                 <span className="col-span-2">Status</span>
-                <span className="col-span-4 text-right">Time Taken</span>
+                <span className="col-span-3 text-right">Time Taken</span>
+                <span className="col-span-3 text-left">Timestamp</span>
               </div>
               {submissionProgress.results.map((result, idx) => {
                 const schedule = schedules[idx];
@@ -1024,13 +1042,13 @@ export default function ScheduleManager() {
                 return (
                   <div
                     key={idx}
-                    className={`grid grid-cols-12 gap-1 py-1 px-1 rounded ${
+                    className={`grid grid-cols-13 gap-1 py-1 px-1 rounded ${
                       result.success ? "text-green-700" : "text-red-600"
                     } ${isLast ? "animate-pulse bg-blue-50" : ""}`}
                   >
                     <span className="col-span-1 font-mono">#{idx + 1}</span>
                     <span
-                      className="col-span-5 truncate"
+                      className="col-span-4 truncate"
                       title={schedule?.["Name of Clinician"] || "Unknown"}
                     >
                       {schedule?.["Name of Clinician"] || "Loading..."}
@@ -1038,8 +1056,11 @@ export default function ScheduleManager() {
                     <span className="col-span-2">
                       {result.success ? "✅" : "❌"}
                     </span>
-                    <span className="col-span-4 text-right font-mono">
+                    <span className="col-span-3 text-right font-mono">
                       {result.timeTakenFormatted || (isLast ? "⏳..." : "—")}
+                    </span>
+                    <span className="col-span-3 text-left text-xs text-gray-500 truncate">
+                      {result.timestamp || "—"}
                     </span>
                   </div>
                 );
@@ -1064,7 +1085,7 @@ export default function ScheduleManager() {
           <div className="mt-4">
             <div className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
               <CheckCircle className="w-4 h-4 text-green-600" />
-              Submission Summary (with time intervals)
+              Submission Summary (with time intervals & timestamps)
             </div>
             <div className="overflow-x-auto rounded-lg border border-gray-200">
               <table className="min-w-full text-sm">
@@ -1090,6 +1111,9 @@ export default function ScheduleManager() {
                     </th>
                     <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">
                       Interval to Next
+                    </th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">
+                      Timestamp
                     </th>
                   </tr>
                 </thead>
@@ -1144,6 +1168,9 @@ export default function ScheduleManager() {
                             ? interval
                             : "—"}
                         </td>
+                        <td className="px-3 py-2 text-xs text-gray-500">
+                          {result.timestamp || "—"}
+                        </td>
                       </tr>
                     );
                   })}
@@ -1165,6 +1192,7 @@ export default function ScheduleManager() {
                         : `${(submissionProgress.results.reduce((sum, r) => sum + (r.timeTaken || 0), 0) / 1000).toFixed(2)}s`}
                     </td>
                     <td className="px-3 py-2"></td>
+                    <td className="px-3 py-2"></td>
                   </tr>
                   <tr>
                     <td
@@ -1185,6 +1213,7 @@ export default function ScheduleManager() {
                           : `${(submissionProgress.results.reduce((sum, r) => sum + (r.timeTaken || 0), 0) / submissionProgress.results.length / 1000).toFixed(2)}s`
                         : "—"}
                     </td>
+                    <td className="px-3 py-2"></td>
                     <td className="px-3 py-2"></td>
                   </tr>
                 </tfoot>
@@ -1540,6 +1569,9 @@ export default function ScheduleManager() {
         }
         .animate-slide-in {
           animation: slide-in 0.3s ease-out;
+        }
+        .grid-cols-13 {
+          grid-template-columns: repeat(13, minmax(0, 1fr));
         }
       `}</style>
     </div>
