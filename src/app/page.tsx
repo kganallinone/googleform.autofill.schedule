@@ -16,6 +16,9 @@ import {
   RefreshCw,
   Lock,
   Unlock,
+  History,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 interface Schedule {
@@ -41,6 +44,23 @@ interface SubmissionResponse {
   }>;
   totalTime: string;
   averageTime: string;
+}
+
+interface ActivityLog {
+  id: string;
+  timestamp: string;
+  type:
+    | "submission"
+    | "add"
+    | "edit"
+    | "delete"
+    | "duplicate"
+    | "bulk_duplicate"
+    | "clear_all";
+  message: string;
+  details?: string;
+  success?: boolean;
+  scheduleCount?: number;
 }
 
 // ====== PASCODE CONFIGURATION ======
@@ -259,6 +279,19 @@ export default function ScheduleManager() {
   const [searchTerm, setSearchTerm] = useState("");
   const [filterDay, setFilterDay] = useState<string>("");
   const [isFormVisible, setIsFormVisible] = useState(true);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [submissionProgress, setSubmissionProgress] = useState<{
+    current: number;
+    total: number;
+    status: "idle" | "running" | "complete" | "error";
+    results: Array<{ index: number; success: boolean; message: string }>;
+  }>({
+    current: 0,
+    total: 0,
+    status: "idle",
+    results: [],
+  });
 
   // Form state for adding/editing
   const [formData, setFormData] = useState<Omit<Schedule, "id">>({
@@ -296,6 +329,15 @@ export default function ScheduleManager() {
       if (savedUrl) {
         setFormUrl(savedUrl);
       }
+
+      const savedLogs = localStorage.getItem("activityLogs");
+      if (savedLogs) {
+        try {
+          setActivityLogs(JSON.parse(savedLogs));
+        } catch (e) {
+          console.error("Error loading activity logs:", e);
+        }
+      }
     }
   }, [isAuthenticated]);
 
@@ -313,15 +355,40 @@ export default function ScheduleManager() {
     }
   }, [formUrl, isAuthenticated]);
 
+  // Save activity logs to localStorage
+  useEffect(() => {
+    if (isAuthenticated) {
+      localStorage.setItem("activityLogs", JSON.stringify(activityLogs));
+    }
+  }, [activityLogs, isAuthenticated]);
+
   const handleUnlock = (passcode: string) => {
     setIsAuthenticated(true);
     sessionStorage.setItem("scheduleManagerAuth", "true");
-    // Optional: store which passcode was used if needed
     sessionStorage.setItem("scheduleManagerPasscode", passcode);
   };
 
   const showToast = (message: string, type: "success" | "error" | "info") => {
     setToast({ message, type });
+  };
+
+  const addActivityLog = (
+    type: ActivityLog["type"],
+    message: string,
+    details?: string,
+    success?: boolean,
+    scheduleCount?: number,
+  ) => {
+    const log: ActivityLog = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+      timestamp: new Date().toISOString(),
+      type,
+      message,
+      details,
+      success,
+      scheduleCount,
+    };
+    setActivityLogs((prev) => [log, ...prev].slice(0, 100)); // Keep last 100 logs
   };
 
   const handleInputChange = (
@@ -357,6 +424,12 @@ export default function ScheduleManager() {
     };
 
     setSchedules((prev) => [...prev, newSchedule]);
+    addActivityLog(
+      "add",
+      `Added schedule for ${newSchedule["Name of Clinician"]}`,
+      `Email: ${newSchedule.Email}`,
+      true,
+    );
     resetForm();
     showToast("Schedule added successfully!", "success");
   };
@@ -379,18 +452,32 @@ export default function ScheduleManager() {
       return;
     }
 
+    const updatedSchedule = { ...formData, id: editingId };
     setSchedules((prev) =>
-      prev.map((s) =>
-        s.id === editingId ? { ...formData, id: editingId } : s,
-      ),
+      prev.map((s) => (s.id === editingId ? updatedSchedule : s)),
+    );
+    addActivityLog(
+      "edit",
+      `Updated schedule for ${updatedSchedule["Name of Clinician"]}`,
+      `ID: ${editingId}`,
+      true,
     );
     resetForm();
     showToast("Schedule updated successfully!", "success");
   };
 
   const handleDeleteSchedule = (id: string) => {
+    const schedule = schedules.find((s) => s.id === id);
     if (confirm("Are you sure you want to delete this schedule?")) {
       setSchedules((prev) => prev.filter((s) => s.id !== id));
+      if (schedule) {
+        addActivityLog(
+          "delete",
+          `Deleted schedule for ${schedule["Name of Clinician"]}`,
+          `ID: ${id}`,
+          true,
+        );
+      }
       showToast("Schedule deleted successfully!", "success");
     }
   };
@@ -404,6 +491,12 @@ export default function ScheduleManager() {
         id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
       };
       setSchedules((prev) => [...prev, newSchedule]);
+      addActivityLog(
+        "duplicate",
+        `Duplicated schedule for ${schedule["Name of Clinician"]}`,
+        `Original ID: ${id}`,
+        true,
+      );
       showToast("Schedule duplicated successfully!", "success");
     }
   };
@@ -418,7 +511,57 @@ export default function ScheduleManager() {
       id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
     }));
     setSchedules((prev) => [...prev, ...duplicates]);
+    addActivityLog(
+      "bulk_duplicate",
+      `Bulk duplicated ${duplicates.length} schedules`,
+      undefined,
+      true,
+      duplicates.length,
+    );
     showToast(`Duplicated ${duplicates.length} schedule(s)!`, "success");
+  };
+
+  const submitSingleSchedule = async (
+    schedule: Schedule,
+    index: number,
+  ): Promise<{ success: boolean; message: string; timeTaken: number }> => {
+    const startTime = performance.now();
+
+    try {
+      const response = await fetch("/api/auto-gf", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          formUrl,
+          action: "submit",
+          schedules: [schedule], // Send one at a time
+        }),
+      });
+
+      const endTime = performance.now();
+      const timeTaken = endTime - startTime;
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data: SubmissionResponse = await response.json();
+
+      return {
+        success: data.success && data.results[0]?.success === true,
+        message: data.results[0]?.message || data.message || "Submitted",
+        timeTaken,
+      };
+    } catch (error) {
+      const endTime = performance.now();
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Submission failed",
+        timeTaken: endTime - startTime,
+      };
+    }
   };
 
   const handleSubmitToGoogleForm = async () => {
@@ -434,52 +577,86 @@ export default function ScheduleManager() {
 
     setIsSubmitting(true);
     setSubmitStatus(null);
+    setSubmissionProgress({
+      current: 0,
+      total: schedules.length,
+      status: "running",
+      results: [],
+    });
 
-    try {
-      const response = await fetch("/api/auto-gf", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          formUrl,
-          action: "submit",
-          schedules,
-        }),
+    const results: Array<{ index: number; success: boolean; message: string }> =
+      [];
+    let successCount = 0;
+    let failureCount = 0;
+
+    // Submit one schedule at a time
+    for (let i = 0; i < schedules.length; i++) {
+      const schedule = schedules[i];
+      const result = await submitSingleSchedule(schedule, i);
+
+      results.push({
+        index: i,
+        success: result.success,
+        message: result.message,
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data: SubmissionResponse = await response.json();
-
-      setSubmitStatus({
-        message: data.message,
-        isError: !data.success,
-      });
-
-      if (data.success) {
-        showToast(
-          `Successfully submitted ${schedules.length} schedule(s)!`,
-          "success",
-        );
+      if (result.success) {
+        successCount++;
       } else {
-        showToast("Some schedules failed to submit. Check details.", "error");
+        failureCount++;
       }
 
-      console.log("Submission results:", data);
-    } catch (error) {
-      console.error("Error submitting schedules:", error);
-      setSubmitStatus({
-        message:
-          error instanceof Error ? error.message : "Failed to submit schedules",
-        isError: true,
+      setSubmissionProgress({
+        current: i + 1,
+        total: schedules.length,
+        status: "running",
+        results: [...results],
       });
-      showToast("Failed to submit schedules. Please try again.", "error");
-    } finally {
-      setIsSubmitting(false);
+
+      // Small delay between submissions to avoid rate limiting
+      if (i < schedules.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
+
+    // Final status
+    const allSuccess = failureCount === 0;
+    setSubmissionProgress({
+      current: schedules.length,
+      total: schedules.length,
+      status: allSuccess ? "complete" : "error",
+      results,
+    });
+
+    const summary = `Submitted ${successCount}/${schedules.length} schedules (${failureCount} failed)`;
+    addActivityLog(
+      "submission",
+      summary,
+      `Form URL: ${formUrl}`,
+      allSuccess,
+      schedules.length,
+    );
+
+    setSubmitStatus({
+      message: allSuccess
+        ? `✅ All ${schedules.length} schedule(s) submitted successfully!`
+        : `⚠️ ${successCount} succeeded, ${failureCount} failed. Check details below.`,
+      isError: !allSuccess,
+    });
+
+    if (allSuccess) {
+      showToast(
+        `All ${schedules.length} schedules submitted successfully!`,
+        "success",
+      );
+    } else {
+      showToast(
+        `${successCount} succeeded, ${failureCount} failed. Check details.`,
+        "error",
+      );
+    }
+
+    setIsSubmitting(false);
   };
 
   // Filter schedules
@@ -524,6 +701,18 @@ export default function ScheduleManager() {
         </h1>
         <div className="flex gap-2 flex-wrap">
           <button
+            onClick={() => setShowHistory(!showHistory)}
+            className="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm flex items-center gap-2"
+          >
+            <History className="w-4 h-4" />
+            {showHistory ? "Hide History" : "History"}
+            {activityLogs.length > 0 && (
+              <span className="bg-indigo-600 text-white text-xs rounded-full px-2 py-0.5 ml-1">
+                {activityLogs.length}
+              </span>
+            )}
+          </button>
+          <button
             onClick={() => setIsFormVisible(!isFormVisible)}
             className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors text-sm flex items-center gap-2"
           >
@@ -534,7 +723,6 @@ export default function ScheduleManager() {
             )}
             {isFormVisible ? "Hide Form" : "Show Form"}
           </button>
-          {/* Optional: Add a lock button to re-lock */}
           <button
             onClick={() => {
               sessionStorage.removeItem("scheduleManagerAuth");
@@ -548,6 +736,81 @@ export default function ScheduleManager() {
           </button>
         </div>
       </div>
+
+      {/* Activity History */}
+      {showHistory && (
+        <div className="bg-white rounded-lg shadow-md p-6 mb-8 border border-gray-200 max-h-96 overflow-y-auto">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold text-gray-700 flex items-center gap-2">
+              <History className="w-5 h-5 text-indigo-600" />
+              Activity History
+            </h2>
+            <button
+              onClick={() => {
+                if (confirm("Clear all activity logs?")) {
+                  setActivityLogs([]);
+                  showToast("History cleared", "info");
+                }
+              }}
+              className="text-sm text-red-600 hover:text-red-800"
+            >
+              Clear All
+            </button>
+          </div>
+          {activityLogs.length === 0 ? (
+            <p className="text-gray-500 text-center py-4">No activity yet</p>
+          ) : (
+            <div className="space-y-2">
+              {activityLogs.map((log) => (
+                <div
+                  key={log.id}
+                  className={`p-3 rounded-lg border ${
+                    log.success === false
+                      ? "bg-red-50 border-red-200"
+                      : log.type === "submission"
+                        ? "bg-green-50 border-green-200"
+                        : "bg-gray-50 border-gray-200"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                          log.type === "submission"
+                            ? "bg-green-200 text-green-800"
+                            : log.type === "add"
+                              ? "bg-blue-200 text-blue-800"
+                              : log.type === "edit"
+                                ? "bg-yellow-200 text-yellow-800"
+                                : log.type === "delete"
+                                  ? "bg-red-200 text-red-800"
+                                  : "bg-purple-200 text-purple-800"
+                        }`}
+                      >
+                        {log.type.replace("_", " ").toUpperCase()}
+                      </span>
+                      <span className="text-sm font-medium text-gray-800">
+                        {log.message}
+                      </span>
+                      {log.scheduleCount !== undefined && (
+                        <span className="text-xs bg-gray-200 px-2 py-0.5 rounded-full">
+                          {log.scheduleCount} items
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-400 whitespace-nowrap">
+                      {new Date(log.timestamp).toLocaleString()}
+                    </span>
+                  </div>
+                  {log.details && (
+                    <p className="text-xs text-gray-500 mt-1">{log.details}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Google Form URL Section */}
       <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg shadow-md p-6 mb-8 border border-blue-100">
@@ -571,7 +834,7 @@ export default function ScheduleManager() {
             {isSubmitting ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Submitting...
+                {submissionProgress.current}/{submissionProgress.total}
               </>
             ) : (
               <>
@@ -581,7 +844,40 @@ export default function ScheduleManager() {
             )}
           </button>
         </div>
-        {submitStatus && (
+
+        {/* Submission Progress */}
+        {isSubmitting && submissionProgress.status === "running" && (
+          <div className="mt-4">
+            <div className="flex justify-between text-sm text-gray-600 mb-1">
+              <span>Submitting...</span>
+              <span>
+                {submissionProgress.current}/{submissionProgress.total}
+              </span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div
+                className="bg-green-600 h-2 rounded-full transition-all duration-300"
+                style={{
+                  width: `${(submissionProgress.current / submissionProgress.total) * 100}%`,
+                }}
+              />
+            </div>
+            <div className="mt-2 max-h-32 overflow-y-auto">
+              {submissionProgress.results.map((result, idx) => (
+                <div
+                  key={idx}
+                  className={`text-xs py-0.5 ${
+                    result.success ? "text-green-600" : "text-red-600"
+                  }`}
+                >
+                  #{idx + 1}: {result.success ? "✅" : "❌"} {result.message}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {submitStatus && !isSubmitting && (
           <div
             className={`mt-4 p-3 rounded-lg flex items-center gap-2 ${
               submitStatus.isError
@@ -768,6 +1064,13 @@ export default function ScheduleManager() {
                 onClick={() => {
                   if (confirm("Delete all schedules?")) {
                     setSchedules([]);
+                    addActivityLog(
+                      "clear_all",
+                      "Cleared all schedules",
+                      undefined,
+                      true,
+                      0,
+                    );
                     showToast("All schedules cleared", "info");
                   }
                 }}
