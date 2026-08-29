@@ -61,6 +61,19 @@ interface ActivityLog {
   details?: string;
   success?: boolean;
   scheduleCount?: number;
+  submissionDetails?: {
+    totalTime: string;
+    averageTime: string;
+    intervals: Array<{
+      scheduleIndex: number;
+      clinicianName: string;
+      success: boolean;
+      timeTaken: string;
+      timeTakenMs: number;
+      intervalToNext?: string;
+      intervalToNextMs?: number;
+    }>;
+  };
 }
 
 // ====== PASCODE CONFIGURATION ======
@@ -285,7 +298,13 @@ export default function ScheduleManager() {
     current: number;
     total: number;
     status: "idle" | "running" | "complete" | "error";
-    results: Array<{ index: number; success: boolean; message: string }>;
+    results: Array<{
+      index: number;
+      success: boolean;
+      message: string;
+      timeTaken?: number;
+      timeTakenFormatted?: string;
+    }>;
   }>({
     current: 0,
     total: 0,
@@ -378,6 +397,7 @@ export default function ScheduleManager() {
     details?: string,
     success?: boolean,
     scheduleCount?: number,
+    submissionDetails?: ActivityLog["submissionDetails"],
   ) => {
     const log: ActivityLog = {
       id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
@@ -387,6 +407,7 @@ export default function ScheduleManager() {
       details,
       success,
       scheduleCount,
+      submissionDetails,
     };
     setActivityLogs((prev) => [log, ...prev].slice(0, 100)); // Keep last 100 logs
   };
@@ -584,20 +605,36 @@ export default function ScheduleManager() {
       results: [],
     });
 
-    const results: Array<{ index: number; success: boolean; message: string }> =
-      [];
+    const results: Array<{
+      index: number;
+      success: boolean;
+      message: string;
+      timeTaken?: number;
+      timeTakenFormatted?: string;
+    }> = [];
     let successCount = 0;
     let failureCount = 0;
 
     // Submit one schedule at a time
     for (let i = 0; i < schedules.length; i++) {
       const schedule = schedules[i];
+      const startTime = performance.now();
       const result = await submitSingleSchedule(schedule, i);
+      const endTime = performance.now();
+      const timeTaken = endTime - startTime;
+
+      // Format the time taken
+      const timeTakenFormatted =
+        timeTaken < 1000
+          ? `${timeTaken.toFixed(0)}ms`
+          : `${(timeTaken / 1000).toFixed(2)}s`;
 
       results.push({
         index: i,
         success: result.success,
         message: result.message,
+        timeTaken: timeTaken,
+        timeTakenFormatted: timeTakenFormatted,
       });
 
       if (result.success) {
@@ -628,25 +665,68 @@ export default function ScheduleManager() {
       results,
     });
 
-    const summary = `Submitted ${successCount}/${schedules.length} schedules (${failureCount} failed)`;
+    // Calculate total time
+    const totalTime = results.reduce((sum, r) => sum + (r.timeTaken || 0), 0);
+    const totalTimeFormatted =
+      totalTime < 1000
+        ? `${totalTime.toFixed(0)}ms`
+        : `${(totalTime / 1000).toFixed(2)}s`;
+
+    // Calculate average time
+    const avgTime = results.length > 0 ? totalTime / results.length : 0;
+    const avgTimeFormatted =
+      avgTime < 1000
+        ? `${avgTime.toFixed(0)}ms`
+        : `${(avgTime / 1000).toFixed(2)}s`;
+
+    // Build intervals data for history
+    const intervals = results.map((result, idx) => {
+      const schedule = schedules[idx];
+      const nextResult = results[idx + 1];
+      const intervalToNext = nextResult ? nextResult.timeTaken : undefined;
+      const intervalToNextFormatted = intervalToNext
+        ? intervalToNext < 1000
+          ? `${intervalToNext.toFixed(0)}ms`
+          : `${(intervalToNext / 1000).toFixed(2)}s`
+        : undefined;
+
+      return {
+        scheduleIndex: idx + 1,
+        clinicianName: schedule?.["Name of Clinician"] || "Unknown",
+        success: result.success,
+        timeTaken: result.timeTakenFormatted || "—",
+        timeTakenMs: result.timeTaken || 0,
+        intervalToNext: intervalToNextFormatted,
+        intervalToNextMs: intervalToNext,
+      };
+    });
+
+    const summary = `Submitted ${successCount}/${schedules.length} schedules (${failureCount} failed) - Total: ${totalTimeFormatted} | Avg: ${avgTimeFormatted}`;
+
+    // Save to activity log with detailed submission data
     addActivityLog(
       "submission",
       summary,
       `Form URL: ${formUrl}`,
       allSuccess,
       schedules.length,
+      {
+        totalTime: totalTimeFormatted,
+        averageTime: avgTimeFormatted,
+        intervals: intervals,
+      },
     );
 
     setSubmitStatus({
       message: allSuccess
-        ? `✅ All ${schedules.length} schedule(s) submitted successfully!`
+        ? `✅ All ${schedules.length} schedule(s) submitted successfully! Total time: ${totalTimeFormatted} | Avg: ${avgTimeFormatted}`
         : `⚠️ ${successCount} succeeded, ${failureCount} failed. Check details below.`,
       isError: !allSuccess,
     });
 
     if (allSuccess) {
       showToast(
-        `All ${schedules.length} schedules submitted successfully!`,
+        `All ${schedules.length} schedules submitted successfully! (${totalTimeFormatted})`,
         "success",
       );
     } else {
@@ -739,8 +819,8 @@ export default function ScheduleManager() {
 
       {/* Activity History */}
       {showHistory && (
-        <div className="bg-white rounded-lg shadow-md p-6 mb-8 border border-gray-200 max-h-96 overflow-y-auto">
-          <div className="flex justify-between items-center mb-4">
+        <div className="bg-white rounded-lg shadow-md p-6 mb-8 border border-gray-200 max-h-[600px] overflow-y-auto">
+          <div className="flex justify-between items-center mb-4 sticky top-0 bg-white z-10 pb-2 border-b">
             <h2 className="text-xl font-semibold text-gray-700 flex items-center gap-2">
               <History className="w-5 h-5 text-indigo-600" />
               Activity History
@@ -760,11 +840,11 @@ export default function ScheduleManager() {
           {activityLogs.length === 0 ? (
             <p className="text-gray-500 text-center py-4">No activity yet</p>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-4">
               {activityLogs.map((log) => (
                 <div
                   key={log.id}
-                  className={`p-3 rounded-lg border ${
+                  className={`p-4 rounded-lg border ${
                     log.success === false
                       ? "bg-red-50 border-red-200"
                       : log.type === "submission"
@@ -773,7 +853,7 @@ export default function ScheduleManager() {
                   }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span
                         className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
                           log.type === "submission"
@@ -804,6 +884,70 @@ export default function ScheduleManager() {
                   </div>
                   {log.details && (
                     <p className="text-xs text-gray-500 mt-1">{log.details}</p>
+                  )}
+
+                  {/* Show submission details with intervals */}
+                  {log.submissionDetails && log.type === "submission" && (
+                    <div className="mt-3">
+                      <div className="flex gap-4 text-xs mb-2">
+                        <span className="font-medium">
+                          Total Time:{" "}
+                          <span className="text-green-700">
+                            {log.submissionDetails.totalTime}
+                          </span>
+                        </span>
+                        <span className="font-medium">
+                          Average Time:{" "}
+                          <span className="text-blue-700">
+                            {log.submissionDetails.averageTime}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-xs">
+                          <thead className="bg-gray-100">
+                            <tr>
+                              <th className="px-2 py-1 text-left">#</th>
+                              <th className="px-2 py-1 text-left">Clinician</th>
+                              <th className="px-2 py-1 text-left">Status</th>
+                              <th className="px-2 py-1 text-right">Time</th>
+                              <th className="px-2 py-1 text-right">
+                                Interval to Next
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {log.submissionDetails.intervals.map(
+                              (item, idx) => (
+                                <tr
+                                  key={idx}
+                                  className="border-t border-gray-100"
+                                >
+                                  <td className="px-2 py-1 font-mono">
+                                    #{item.scheduleIndex}
+                                  </td>
+                                  <td
+                                    className="px-2 py-1 max-w-[100px] truncate"
+                                    title={item.clinicianName}
+                                  >
+                                    {item.clinicianName}
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    {item.success ? "✅" : "❌"}
+                                  </td>
+                                  <td className="px-2 py-1 text-right font-mono">
+                                    {item.timeTaken}
+                                  </td>
+                                  <td className="px-2 py-1 text-right font-mono text-gray-500">
+                                    {item.intervalToNext || "—"}
+                                  </td>
+                                </tr>
+                              ),
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   )}
                 </div>
               ))}
@@ -845,7 +989,7 @@ export default function ScheduleManager() {
           </button>
         </div>
 
-        {/* Submission Progress */}
+        {/* Submission Progress with Time Intervals */}
         {isSubmitting && submissionProgress.status === "running" && (
           <div className="mt-4">
             <div className="flex justify-between text-sm text-gray-600 mb-1">
@@ -862,37 +1006,211 @@ export default function ScheduleManager() {
                 }}
               />
             </div>
-            <div className="mt-2 max-h-32 overflow-y-auto">
-              {submissionProgress.results.map((result, idx) => (
-                <div
-                  key={idx}
-                  className={`text-xs py-0.5 ${
-                    result.success ? "text-green-600" : "text-red-600"
-                  }`}
-                >
-                  #{idx + 1}: {result.success ? "✅" : "❌"} {result.message}
-                </div>
-              ))}
+
+            {/* Enhanced results with time intervals */}
+            <div className="mt-3 max-h-48 overflow-y-auto">
+              <div className="grid grid-cols-12 gap-1 text-xs font-semibold text-gray-500 mb-1 px-1">
+                <span className="col-span-1">#</span>
+                <span className="col-span-5">Schedule</span>
+                <span className="col-span-2">Status</span>
+                <span className="col-span-4 text-right">Time Taken</span>
+              </div>
+              {submissionProgress.results.map((result, idx) => {
+                const schedule = schedules[idx];
+                const isLast =
+                  idx === submissionProgress.results.length - 1 &&
+                  submissionProgress.status === "running";
+
+                return (
+                  <div
+                    key={idx}
+                    className={`grid grid-cols-12 gap-1 py-1 px-1 rounded ${
+                      result.success ? "text-green-700" : "text-red-600"
+                    } ${isLast ? "animate-pulse bg-blue-50" : ""}`}
+                  >
+                    <span className="col-span-1 font-mono">#{idx + 1}</span>
+                    <span
+                      className="col-span-5 truncate"
+                      title={schedule?.["Name of Clinician"] || "Unknown"}
+                    >
+                      {schedule?.["Name of Clinician"] || "Loading..."}
+                    </span>
+                    <span className="col-span-2">
+                      {result.success ? "✅" : "❌"}
+                    </span>
+                    <span className="col-span-4 text-right font-mono">
+                      {result.timeTakenFormatted || (isLast ? "⏳..." : "—")}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Show intervals between schedules */}
+            {submissionProgress.results.length > 1 && (
+              <div className="mt-2 text-xs text-gray-400 flex flex-wrap gap-2 justify-center">
+                {submissionProgress.results.slice(0, -1).map((result, idx) => (
+                  <span key={idx} className="bg-gray-100 px-2 py-0.5 rounded">
+                    #{idx + 1} → #{idx + 2}: {result.timeTakenFormatted || "—"}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Completion Summary with Full Table */}
+        {!isSubmitting && submissionProgress.status === "complete" && (
+          <div className="mt-4">
+            <div className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+              <CheckCircle className="w-4 h-4 text-green-600" />
+              Submission Summary (with time intervals)
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">
+                      #
+                    </th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">
+                      Clinician
+                    </th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">
+                      Email
+                    </th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">
+                      Day
+                    </th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">
+                      Status
+                    </th>
+                    <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">
+                      Time Taken
+                    </th>
+                    <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">
+                      Interval to Next
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {submissionProgress.results.map((result, idx) => {
+                    const schedule = schedules[idx];
+                    const nextTime =
+                      submissionProgress.results[idx + 1]?.timeTaken || 0;
+                    const interval =
+                      nextTime > 0
+                        ? nextTime < 1000
+                          ? `${nextTime.toFixed(0)}ms`
+                          : `${(nextTime / 1000).toFixed(2)}s`
+                        : "—";
+
+                    return (
+                      <tr
+                        key={idx}
+                        className="border-t border-gray-100 hover:bg-gray-50 transition-colors"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          #{idx + 1}
+                        </td>
+                        <td className="px-3 py-2 font-medium">
+                          {schedule?.["Name of Clinician"] || "—"}
+                        </td>
+                        <td
+                          className="px-3 py-2 text-xs truncate max-w-[150px]"
+                          title={schedule?.Email}
+                        >
+                          {schedule?.Email || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-xs">
+                          <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full">
+                            {schedule?.["Scheduled Day"] || "—"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={
+                              result.success ? "text-green-600" : "text-red-600"
+                            }
+                          >
+                            {result.success ? "✅ Success" : "❌ Failed"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {result.timeTakenFormatted || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-gray-500">
+                          {idx < submissionProgress.results.length - 1
+                            ? interval
+                            : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot className="bg-gray-50 border-t border-gray-200">
+                  <tr>
+                    <td
+                      colSpan={5}
+                      className="px-3 py-2 font-semibold text-right"
+                    >
+                      Total Time:
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono font-semibold text-green-700">
+                      {submissionProgress.results.reduce(
+                        (sum, r) => sum + (r.timeTaken || 0),
+                        0,
+                      ) < 1000
+                        ? `${submissionProgress.results.reduce((sum, r) => sum + (r.timeTaken || 0), 0).toFixed(0)}ms`
+                        : `${(submissionProgress.results.reduce((sum, r) => sum + (r.timeTaken || 0), 0) / 1000).toFixed(2)}s`}
+                    </td>
+                    <td className="px-3 py-2"></td>
+                  </tr>
+                  <tr>
+                    <td
+                      colSpan={5}
+                      className="px-3 py-2 font-semibold text-right"
+                    >
+                      Average Time:
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-blue-700">
+                      {submissionProgress.results.length > 0
+                        ? submissionProgress.results.reduce(
+                            (sum, r) => sum + (r.timeTaken || 0),
+                            0,
+                          ) /
+                            submissionProgress.results.length <
+                          1000
+                          ? `${(submissionProgress.results.reduce((sum, r) => sum + (r.timeTaken || 0), 0) / submissionProgress.results.length).toFixed(0)}ms`
+                          : `${(submissionProgress.results.reduce((sum, r) => sum + (r.timeTaken || 0), 0) / submissionProgress.results.length / 1000).toFixed(2)}s`
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2"></td>
+                  </tr>
+                </tfoot>
+              </table>
             </div>
           </div>
         )}
 
-        {submitStatus && !isSubmitting && (
-          <div
-            className={`mt-4 p-3 rounded-lg flex items-center gap-2 ${
-              submitStatus.isError
-                ? "bg-red-100 text-red-700"
-                : "bg-green-100 text-green-700"
-            }`}
-          >
-            {submitStatus.isError ? (
-              <AlertCircle className="w-5 h-5" />
-            ) : (
-              <CheckCircle className="w-5 h-5" />
-            )}
-            {submitStatus.message}
-          </div>
-        )}
+        {submitStatus &&
+          !isSubmitting &&
+          submissionProgress.status !== "complete" && (
+            <div
+              className={`mt-4 p-3 rounded-lg flex items-center gap-2 ${
+                submitStatus.isError
+                  ? "bg-red-100 text-red-700"
+                  : "bg-green-100 text-green-700"
+              }`}
+            >
+              {submitStatus.isError ? (
+                <AlertCircle className="w-5 h-5" />
+              ) : (
+                <CheckCircle className="w-5 h-5" />
+              )}
+              {submitStatus.message}
+            </div>
+          )}
       </div>
 
       {/* Add/Edit Form */}
