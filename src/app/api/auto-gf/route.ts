@@ -1,80 +1,30 @@
 import { NextResponse } from "next/server";
 import * as cheerio from "cheerio";
-import puppeteer from "puppeteer";
+import puppeteer, { Browser, Page } from "puppeteer";
 
-// In-memory cache: formUrl -> entryMap
-const cache = new Map<string, Record<string, string>>();
+/**
+ * ============================================================
+ * CONFIGURATION
+ * ============================================================
+ */
 
-async function getEntryIdMap(formUrl: string): Promise<Record<string, string>> {
-  if (cache.has(formUrl)) {
-    return cache.get(formUrl)!;
-  }
+const CONCURRENCY_LIMIT = 5;
 
-  const response = await fetch(formUrl, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch form: ${response.statusText}`);
-  }
-  const html = await response.text();
-  const $ = cheerio.load(html);
+const PAGE_TIMEOUT = 20_000;
 
-  const map: Record<string, string> = {};
+const FORM_CACHE_TTL = 1000 * 60 * 60; // 1 hour
 
-  // Find all question headings with role="heading"
-  $('[role="heading"]').each((i, el) => {
-    const heading = $(el);
-    const label = heading.text().trim();
-    if (!label) return;
+/**
+ * ============================================================
+ * TYPES
+ * ============================================================
+ */
 
-    // Find the closest container that contains the input
-    const container = heading.closest(".geS5n, .AgroKb, .Qr7Oae");
-    if (!container.length) return;
-
-    // Try to find an input with name starting with "entry."
-    let input = container.find('input[name^="entry."]').first();
-    if (!input.length) {
-      // For radio groups, there's a hidden input with name ending with "_sentinel"
-      input = container.find('input[name$="_sentinel"]').first();
-    }
-    if (!input.length) {
-      // For textareas
-      input = container.find('textarea[name^="entry."]').first();
-    }
-    if (input.length) {
-      const name = input.attr("name");
-      if (name) {
-        // Remove "_sentinel" suffix if present
-        const entryId = name.replace("_sentinel", "");
-        map[label] = entryId;
-      }
-    }
-  });
-
-  cache.set(formUrl, map);
-  return map;
+interface CacheEntry {
+  data: Record<string, string>;
+  expiresAt: number;
 }
 
-function buildPrefilledUrl(
-  baseUrl: string,
-  entryMap: Record<string, string>,
-  fields: Record<string, string>,
-): string {
-  const url = new URL(baseUrl);
-  for (const [label, value] of Object.entries(fields)) {
-    const entryId = entryMap[label];
-    if (entryId) {
-      url.searchParams.append(entryId, value);
-    }
-  }
-  return url.toString();
-}
-
-function formatTime(milliseconds: number): string {
-  return (milliseconds / 1000).toFixed(2) + "s";
-}
-
-// Define the result type
 interface ScheduleResult {
   scheduleIndex: number;
   success: boolean;
@@ -83,16 +33,284 @@ interface ScheduleResult {
   timeTakenFormatted: string;
 }
 
-async function checkFormStatus(
-  page: any,
-): Promise<{ isViewOnly: boolean; isSubmitted: boolean; message?: string }> {
+interface FormStatus {
+  isViewOnly: boolean;
+  isSubmitted: boolean;
+  message?: string;
+}
+
+/**
+ * ============================================================
+ * GLOBAL CACHE
+ * ============================================================
+ */
+
+const entryCache = new Map<string, CacheEntry>();
+
+/**
+ * Browser instance reused while the server instance is alive.
+ */
+let browserInstance: Browser | null = null;
+
+let browserLaunching: Promise<Browser> | null = null;
+
+/**
+ * ============================================================
+ * UTILITY FUNCTIONS
+ * ============================================================
+ */
+
+function formatTime(milliseconds: number): string {
+  return `${(milliseconds / 1000).toFixed(2)}s`;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * ============================================================
+ * GOOGLE FORM ENTRY MAP
+ * ============================================================
+ */
+
+async function getEntryIdMap(formUrl: string): Promise<Record<string, string>> {
+  const cached = entryCache.get(formUrl);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log("⚡ Using cached form entry map");
+    return cached.data;
+  }
+
+  console.log("🌐 Fetching Google Form entry map...");
+
+  const response = await fetch(formUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch form: ${response.status} ${response.statusText}`,
+    );
+  }
+
+  const html = await response.text();
+
+  const $ = cheerio.load(html);
+
+  const map: Record<string, string> = {};
+
+  $('[role="heading"]').each((_, element) => {
+    const heading = $(element);
+
+    const label = heading.text().trim();
+
+    if (!label) return;
+
+    const container = heading.closest(".geS5n, .AgroKb, .Qr7Oae");
+
+    if (!container.length) return;
+
+    let input = container.find('input[name^="entry."]').first();
+
+    if (!input.length) {
+      input = container.find('input[name$="_sentinel"]').first();
+    }
+
+    if (!input.length) {
+      input = container.find('textarea[name^="entry."]').first();
+    }
+
+    if (!input.length) return;
+
+    const name = input.attr("name");
+
+    if (!name) return;
+
+    const entryId = name.replace("_sentinel", "");
+
+    map[label] = entryId;
+  });
+
+  entryCache.set(formUrl, {
+    data: map,
+    expiresAt: Date.now() + FORM_CACHE_TTL,
+  });
+
+  console.log(`✅ Cached ${Object.keys(map).length} form fields`);
+
+  return map;
+}
+
+/**
+ * ============================================================
+ * PREFILLED URL
+ * ============================================================
+ */
+
+function buildPrefilledUrl(
+  baseUrl: string,
+  entryMap: Record<string, string>,
+  fields: Record<string, string>,
+): string {
+  const url = new URL(baseUrl);
+
+  for (const [label, value] of Object.entries(fields)) {
+    const entryId = entryMap[label];
+
+    if (entryId && value !== undefined && value !== null) {
+      url.searchParams.set(entryId, String(value));
+    }
+  }
+
+  return url.toString();
+}
+
+/**
+ * ============================================================
+ * BROWSER MANAGEMENT
+ * ============================================================
+ */
+
+async function getBrowser(): Promise<Browser> {
+  /**
+   * Reuse existing browser.
+   */
+  if (browserInstance?.connected) {
+    return browserInstance;
+  }
+
+  /**
+   * Prevent multiple simultaneous browser launches.
+   */
+  if (browserLaunching) {
+    return browserLaunching;
+  }
+
+  console.log("🚀 Launching Puppeteer browser...");
+
+  browserLaunching = puppeteer
+    .launch({
+      headless: true,
+
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+
+        "--disable-dev-shm-usage",
+
+        "--disable-gpu",
+
+        "--disable-software-rasterizer",
+
+        "--disable-extensions",
+
+        "--disable-background-networking",
+
+        "--disable-background-timer-throttling",
+
+        "--disable-renderer-backgrounding",
+
+        "--disable-features=Translate,BackForwardCache",
+
+        "--mute-audio",
+      ],
+    })
+    .then((browser) => {
+      browserInstance = browser;
+
+      browser.on("disconnected", () => {
+        console.warn("⚠️ Browser disconnected");
+
+        browserInstance = null;
+        browserLaunching = null;
+      });
+
+      console.log("✅ Browser ready");
+
+      return browser;
+    })
+    .catch((error) => {
+      browserInstance = null;
+      browserLaunching = null;
+
+      throw error;
+    });
+
+  return browserLaunching;
+}
+
+/**
+ * ============================================================
+ * PAGE OPTIMIZATION
+ * ============================================================
+ */
+
+async function createOptimizedPage(browser: Browser): Promise<Page> {
+  const page = await browser.newPage();
+
+  page.setDefaultTimeout(PAGE_TIMEOUT);
+  page.setDefaultNavigationTimeout(PAGE_TIMEOUT);
+
+  await page.setViewport({
+    width: 1280,
+    height: 720,
+  });
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  );
+
+  /**
+   * Block unnecessary resources.
+   */
+  await page.setRequestInterception(true);
+
+  page.on("request", (request) => {
+    const resourceType = request.resourceType();
+
+    const blockedResources = ["image", "font", "media", "stylesheet"];
+
+    if (blockedResources.includes(resourceType)) {
+      request.abort().catch(() => {});
+    } else {
+      request.continue().catch(() => {});
+    }
+  });
+
+  return page;
+}
+
+/**
+ * ============================================================
+ * FORM STATUS
+ * ============================================================
+ */
+
+async function checkFormStatus(page: Page): Promise<FormStatus> {
   try {
-    // Check if form is in view-only mode (already submitted)
-    const status = await page.evaluate(() => {
-      // Check for thank you message
+    return await page.evaluate(() => {
+      const bodyText = document.body?.textContent || "";
+
+      /**
+       * Google Form success messages.
+       */
+      if (bodyText.includes("Your response has been recorded")) {
+        return {
+          isViewOnly: true,
+          isSubmitted: true,
+          message: "Your response has been recorded",
+        };
+      }
+
       const thankYou = document.querySelector(
         ".freebirdFormviewerViewResponseConfirmationMessage",
       );
+
       if (thankYou) {
         return {
           isViewOnly: true,
@@ -101,57 +319,140 @@ async function checkFormStatus(
         };
       }
 
-      // Check for "Your response has been recorded" text
-      const responseRecorded = document.body.textContent?.includes(
-        "Your response has been recorded",
-      );
-      if (responseRecorded) {
-        return {
-          isViewOnly: true,
-          isSubmitted: true,
-          message: "Your response has been recorded",
-        };
-      }
-
-      // Check if form is in view mode (all fields disabled)
-      const inputs = document.querySelectorAll(
-        'input:not([type="hidden"]), textarea',
-      );
-      let allDisabled = true;
-
-      for (const input of inputs) {
-        if (
-          !input.hasAttribute("disabled") &&
-          !input.hasAttribute("aria-disabled")
-        ) {
-          allDisabled = false;
-          break;
-        }
-      }
-
-      if (allDisabled && inputs.length > 0) {
-        return {
-          isViewOnly: true,
-          isSubmitted: false,
-          message: "Form is in view-only mode",
-        };
-      }
-
       return {
         isViewOnly: false,
         isSubmitted: false,
       };
     });
-
-    return status;
   } catch (error) {
     console.error("Error checking form status:", error);
-    return { isViewOnly: false, isSubmitted: false };
+
+    return {
+      isViewOnly: false,
+      isSubmitted: false,
+    };
   }
 }
 
-async function submitSingleScheduleInTab(
-  page: any,
+/**
+ * ============================================================
+ * FILL FORM FIELD
+ * ============================================================
+ */
+
+async function fillField(
+  page: Page,
+  labelText: string,
+  valueText: string,
+): Promise<boolean> {
+  return page.evaluate(
+    (label, value) => {
+      const headings = document.querySelectorAll('[role="heading"]');
+
+      let targetContainer: Element | null = null;
+
+      for (const heading of headings) {
+        const headingText = heading.textContent?.trim() || "";
+
+        if (headingText === label || headingText.includes(label)) {
+          targetContainer = heading.closest(".geS5n, .AgroKb, .Qr7Oae");
+
+          if (targetContainer) break;
+        }
+      }
+
+      if (!targetContainer) {
+        return false;
+      }
+
+      /**
+       * RADIO BUTTON
+       */
+      const radios = targetContainer.querySelectorAll(
+        '[role="radio"]:not([aria-disabled="true"])',
+      );
+
+      if (radios.length > 0) {
+        for (const radio of radios) {
+          const element = radio as HTMLElement;
+
+          const ariaLabel = element.getAttribute("aria-label");
+
+          const dataValue = element.getAttribute("data-value");
+
+          if (ariaLabel === value || dataValue === value) {
+            element.click();
+
+            return true;
+          }
+        }
+
+        return false;
+      }
+
+      /**
+       * TEXT INPUT
+       */
+      const input = targetContainer.querySelector(
+        'input:not([type="hidden"]):not([disabled])',
+      ) as HTMLInputElement | null;
+
+      if (input) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )?.set;
+
+        nativeSetter?.call(input, value);
+
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+
+        input.dispatchEvent(new Event("blur", { bubbles: true }));
+
+        return true;
+      }
+
+      /**
+       * TEXTAREA
+       */
+      const textarea = targetContainer.querySelector(
+        "textarea:not([disabled])",
+      ) as HTMLTextAreaElement | null;
+
+      if (textarea) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )?.set;
+
+        nativeSetter?.call(textarea, value);
+
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+
+        textarea.dispatchEvent(new Event("blur", { bubbles: true }));
+
+        return true;
+      }
+
+      return false;
+    },
+    labelText,
+    valueText,
+  );
+}
+
+/**
+ * ============================================================
+ * SUBMIT SINGLE FORM
+ * ============================================================
+ */
+
+async function submitSingleSchedule(
+  page: Page,
   formUrl: string,
   fields: Record<string, string>,
   scheduleIndex: number,
@@ -159,211 +460,107 @@ async function submitSingleScheduleInTab(
   const startTime = Date.now();
 
   try {
-    console.log(`[Schedule ${scheduleIndex}] Navigating to form...`);
+    console.log(`[Schedule ${scheduleIndex}] Loading form...`);
+
+    /**
+     * Faster than networkidle2.
+     */
     await page.goto(formUrl, {
-      waitUntil: "networkidle2",
-      timeout: 30000,
+      waitUntil: "domcontentloaded",
+      timeout: PAGE_TIMEOUT,
     });
 
-    // Check if form is already submitted or in view-only mode
+    /**
+     * Wait only for the actual form.
+     */
+    await page.waitForSelector("form#mG61Hd", {
+      timeout: 10_000,
+    });
+
+    /**
+     * Check submission status.
+     */
     const formStatus = await checkFormStatus(page);
 
-    // If the form shows "Your response has been recorded", consider it a SUCCESS
-    // This means the form was already successfully submitted previously
-    if (
-      formStatus.isSubmitted &&
-      formStatus.message?.includes("Your response has been recorded")
-    ) {
-      console.log(
-        `[Schedule ${scheduleIndex}] ✅ Form already has a recorded response (treating as success)`,
-      );
+    if (formStatus.isSubmitted) {
       const timeTaken = Date.now() - startTime;
+
       return {
-        success: true, // Treat as success
-        message: `Form already has a recorded response (previous submission successful)`,
+        success: true,
+        message: formStatus.message || "Form already submitted",
         timeTaken,
         timeTakenFormatted: formatTime(timeTaken),
         scheduleIndex,
       };
     }
 
-    // If form is in view-only mode for other reasons, treat as error
     if (formStatus.isViewOnly) {
-      console.log(`[Schedule ${scheduleIndex}] Form is in view-only mode`);
       const timeTaken = Date.now() - startTime;
+
       return {
         success: false,
-        message: `Form is in view-only mode. Please use a fresh form URL.`,
+        message: formStatus.message || "Form is in view-only mode",
         timeTaken,
         timeTakenFormatted: formatTime(timeTaken),
         scheduleIndex,
       };
     }
 
-    await page.waitForSelector("form#mG61Hd", { timeout: 10000 });
-    console.log(`[Schedule ${scheduleIndex}] Form loaded successfully`);
-
-    // Fill in the fields
+    /**
+     * Fill fields.
+     */
     for (const [label, value] of Object.entries(fields)) {
-      console.log(
-        `[Schedule ${scheduleIndex}] Filling field: "${label}" = "${value}"`,
-      );
+      if (value === undefined || value === null) {
+        continue;
+      }
 
       try {
-        const fieldFilled = await page.evaluate(
-          (labelText: string, valueText: string) => {
-            // Find the question container by heading text
-            const allHeadings = document.querySelectorAll('[role="heading"]');
-            let targetContainer: Element | null = null;
+        const filled = await fillField(page, label, String(value));
 
-            // Find the heading that matches
-            for (const heading of allHeadings) {
-              const headingText = heading.textContent?.trim() || "";
-              if (
-                headingText === labelText ||
-                headingText.includes(labelText)
-              ) {
-                targetContainer = heading.closest(".geS5n, .AgroKb, .Qr7Oae");
-                if (targetContainer) {
-                  break;
-                }
-              }
-            }
-
-            if (!targetContainer) {
-              console.log(`Could not find container for: ${labelText}`);
-              return false;
-            }
-
-            // Check if this is a radio group - look for the sentinel input
-            const sentinelInput = targetContainer.querySelector(
-              'input[name$="_sentinel"]',
-            );
-            if (sentinelInput) {
-              console.log(`Found radio group for: ${labelText}`);
-
-              // Find all radio buttons in this container
-              const radioButtons = targetContainer.querySelectorAll(
-                '[role="radio"]:not([aria-disabled="true"])',
-              );
-              console.log(`Found ${radioButtons.length} radio buttons`);
-
-              for (const radio of radioButtons) {
-                const radioEl = radio as HTMLElement;
-
-                // Check by aria-label (most reliable)
-                const ariaLabel = radioEl.getAttribute("aria-label");
-                console.log(
-                  `Checking radio: aria-label="${ariaLabel}", data-value="${radioEl.getAttribute("data-value")}"`,
-                );
-
-                // Check if this radio button matches the value we want
-                if (
-                  ariaLabel === valueText ||
-                  radioEl.getAttribute("data-value") === valueText
-                ) {
-                  console.log(`✅ Clicking radio: ${ariaLabel}`);
-                  radioEl.click();
-
-                  // Trigger change event on the sentinel input
-                  if (sentinelInput) {
-                    sentinelInput.dispatchEvent(
-                      new Event("change", { bubbles: true }),
-                    );
-                  }
-
-                  return true;
-                }
-              }
-
-              console.log(`❌ Could not find radio option: ${valueText}`);
-              return false;
-            }
-
-            // Check for text input
-            const textInput = targetContainer.querySelector(
-              'input:not([type="hidden"]):not([disabled])',
-            ) as HTMLInputElement | null;
-            if (textInput) {
-              console.log(`Filling text input: ${labelText}`);
-              textInput.value = valueText;
-              textInput.dispatchEvent(new Event("input", { bubbles: true }));
-              textInput.dispatchEvent(new Event("change", { bubbles: true }));
-              return true;
-            }
-
-            // Check for textarea
-            const textarea = targetContainer.querySelector(
-              "textarea:not([disabled])",
-            ) as HTMLTextAreaElement | null;
-            if (textarea) {
-              console.log(`Filling textarea: ${labelText}`);
-              textarea.value = valueText;
-              textarea.dispatchEvent(new Event("input", { bubbles: true }));
-              textarea.dispatchEvent(new Event("change", { bubbles: true }));
-              return true;
-            }
-
-            console.log(`No input found for: ${labelText}`);
-            return false;
-          },
-          label,
-          value,
-        );
-
-        if (!fieldFilled) {
-          console.warn(
-            `[Schedule ${scheduleIndex}] ⚠️ Could not fill field: ${label}`,
-          );
-        } else {
-          console.log(`[Schedule ${scheduleIndex}] ✅ Filled: ${label}`);
+        if (!filled) {
+          console.warn(`[Schedule ${scheduleIndex}] Field not found: ${label}`);
         }
       } catch (error) {
         console.error(
-          `[Schedule ${scheduleIndex}] Error filling field ${label}:`,
+          `[Schedule ${scheduleIndex}] Error filling ${label}:`,
           error,
         );
       }
     }
 
-    // Wait a moment to ensure all fields are filled
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    /**
+     * Small delay only for UI event processing.
+     */
+    await sleep(100);
 
-    // Find and click the submit button
-    console.log(`[Schedule ${scheduleIndex}] Looking for submit button...`);
-
-    const submitClicked = await page.evaluate(() => {
-      // Find by text content
-      const allButtons = document.querySelectorAll(
-        '[role="button"]:not([disabled]), button:not([disabled]), .uArJ5e:not([disabled])',
+    /**
+     * Click submit.
+     */
+    const submitted = await page.evaluate(() => {
+      const buttons = Array.from(
+        document.querySelectorAll(
+          '[role="button"]:not([disabled]), button:not([disabled])',
+        ),
       );
-      for (const btn of allButtons) {
-        const text = btn.textContent?.toLowerCase() || "";
-        if (text.includes("submit") || text.includes("send")) {
-          console.log(`Found submit button: "${btn.textContent}"`);
-          (btn as HTMLElement).click();
-          return true;
-        }
+
+      const submitButton = buttons.find((button) => {
+        const text = button.textContent?.toLowerCase() || "";
+
+        return text.includes("submit") || text.includes("send");
+      });
+
+      if (!submitButton) {
+        return false;
       }
 
-      // Try to find by class
-      const submitBtn = document.querySelector(
-        '.QvWxOd:not([disabled]), .lRwqcd [role="button"]:not([disabled])',
-      );
-      if (submitBtn) {
-        console.log("Found submit button by class");
-        (submitBtn as HTMLElement).click();
-        return true;
-      }
+      (submitButton as HTMLElement).click();
 
-      return false;
+      return true;
     });
 
-    if (!submitClicked) {
-      console.warn(
-        `[Schedule ${scheduleIndex}] ⚠️ Could not find submit button`,
-      );
+    if (!submitted) {
       const timeTaken = Date.now() - startTime;
+
       return {
         success: false,
         message: "Could not find submit button",
@@ -373,135 +570,102 @@ async function submitSingleScheduleInTab(
       };
     }
 
-    console.log(`[Schedule ${scheduleIndex}] ✅ Submit button clicked!`);
+    /**
+     * Wait for success response.
+     */
+    const result = await page
+      .waitForFunction(
+        () => {
+          const text = document.body?.textContent || "";
 
-    // Wait for submission to complete - check for various success indicators
-    console.log(
-      `[Schedule ${scheduleIndex}] Waiting for submission response...`,
-    );
-
-    // Wait for either success or error
-    const result = await page.waitForFunction(
-      () => {
-        // Check for thank you message
-        const thankYou = document.querySelector(
-          ".freebirdFormviewerViewResponseConfirmationMessage",
-        );
-        if (thankYou) {
-          return {
-            success: true,
-            message: thankYou.textContent || "Form submitted successfully",
-          };
-        }
-
-        // Check for "Your response has been recorded"
-        const responseRecorded = document.body.textContent?.includes(
-          "Your response has been recorded",
-        );
-        if (responseRecorded) {
-          return {
-            success: true,
-            message: "Your response has been recorded",
-          };
-        }
-
-        // Check for view-only mode (indicates successful submission)
-        const inputs = document.querySelectorAll(
-          'input:not([type="hidden"]), textarea',
-        );
-        let allDisabled = true;
-        for (const input of inputs) {
-          if (
-            !input.hasAttribute("disabled") &&
-            !input.hasAttribute("aria-disabled")
-          ) {
-            allDisabled = false;
-            break;
-          }
-        }
-        if (allDisabled && inputs.length > 0) {
-          return {
-            success: true,
-            message: "Form submitted successfully (view mode detected)",
-          };
-        }
-
-        // Check for error messages
-        const errorMessages = document.querySelectorAll(
-          ".errorbox, .freebirdFormviewerViewNumberedItemContainer",
-        );
-        for (const error of errorMessages) {
-          if (
-            error.textContent?.includes("required") ||
-            error.textContent?.includes("invalid")
-          ) {
+          if (text.includes("Your response has been recorded")) {
             return {
-              success: false,
-              message: "Form validation failed: " + error.textContent,
+              success: true,
+              message: "Your response has been recorded",
             };
           }
-        }
 
-        return null;
-      },
-      { timeout: 15000, polling: 500 },
-    );
+          const confirmation = document.querySelector(
+            ".freebirdFormviewerViewResponseConfirmationMessage",
+          );
+
+          if (confirmation) {
+            return {
+              success: true,
+              message:
+                confirmation.textContent || "Form submitted successfully",
+            };
+          }
+
+          /**
+           * Detect validation errors.
+           */
+          const errorText = Array.from(
+            document.querySelectorAll(
+              '[role="alert"], .freebirdFormviewerViewItemsItemItem',
+            ),
+          )
+            .map((element) => element.textContent?.toLowerCase() || "")
+            .join(" ");
+
+          if (errorText.includes("required") || errorText.includes("invalid")) {
+            return {
+              success: false,
+              message: "Form validation failed",
+            };
+          }
+
+          return null;
+        },
+        {
+          timeout: 12_000,
+          polling: 250,
+        },
+      )
+      .catch(() => null);
 
     const timeTaken = Date.now() - startTime;
 
-    // Check the result
-    if (result && typeof result === "object" && "success" in result) {
-      return {
-        success: result.success,
-        message:
-          result.message ||
-          (result.success
-            ? "Form submitted successfully"
-            : "Form submission failed"),
-        timeTaken,
-        timeTakenFormatted: formatTime(timeTaken),
-        scheduleIndex,
-      };
-    } else {
-      // Check if we got redirected or if form is now in view-only mode
-      const currentUrl = page.url();
-      if (
-        currentUrl.includes("viewform?vc=0") ||
-        currentUrl.includes("formResponse") ||
-        currentUrl.includes("viewform?usp=embed")
-      ) {
+    if (result) {
+      const data = await result.jsonValue();
+
+      if (data && typeof data === "object" && "success" in data) {
+        const typedData = data as {
+          success: boolean;
+          message?: string;
+        };
+
         return {
-          success: true,
-          message: "Form submitted successfully",
+          success: typedData.success,
+          message:
+            typedData.message ||
+            (typedData.success
+              ? "Form submitted successfully"
+              : "Form submission failed"),
           timeTaken,
           timeTakenFormatted: formatTime(timeTaken),
           scheduleIndex,
         };
       }
-
-      // Check if form is now in view-only mode
-      const finalStatus = await checkFormStatus(page);
-      if (finalStatus.isSubmitted) {
-        return {
-          success: true,
-          message: "Form submitted successfully",
-          timeTaken,
-          timeTakenFormatted: formatTime(timeTaken),
-          scheduleIndex,
-        };
-      }
-
-      return {
-        success: false,
-        message: "Form submission failed - unexpected response",
-        timeTaken,
-        timeTakenFormatted: formatTime(timeTaken),
-        scheduleIndex,
-      };
     }
+
+    /**
+     * Final fallback status check.
+     */
+    const finalStatus = await checkFormStatus(page);
+
+    return {
+      success: finalStatus.isSubmitted,
+      message: finalStatus.message || "Submission response timeout",
+      timeTaken,
+      timeTakenFormatted: formatTime(timeTaken),
+      scheduleIndex,
+    };
   } catch (error: any) {
     console.error(`[Schedule ${scheduleIndex}] Error:`, error);
+
     const timeTaken = Date.now() - startTime;
+
     return {
       success: false,
       message: `Error: ${error.message}`,
@@ -512,250 +676,262 @@ async function submitSingleScheduleInTab(
   }
 }
 
-async function submitMultipleSchedulesParallel(
+/**
+ * ============================================================
+ * CONCURRENCY CONTROL
+ * ============================================================
+ */
+
+async function processSchedulesWithLimit(
+  browser: Browser,
   formUrl: string,
   schedules: Record<string, string>[],
-): Promise<{
-  success: boolean;
-  message?: string;
-  results?: ScheduleResult[];
-  totalTime: number;
-  totalTimeFormatted: string;
-  averageTime: number;
-  averageTimeFormatted: string;
-}> {
-  let browser: any = null;
+): Promise<ScheduleResult[]> {
   const results: ScheduleResult[] = [];
 
+  let currentIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const index = currentIndex++;
+
+      if (index >= schedules.length) {
+        return;
+      }
+
+      const page = await createOptimizedPage(browser);
+
+      try {
+        const result = await submitSingleSchedule(
+          page,
+          formUrl,
+          schedules[index],
+          index + 1,
+        );
+
+        results.push(result);
+      } finally {
+        await page.close().catch(() => {});
+      }
+    }
+  }
+
+  const workerCount = Math.min(CONCURRENCY_LIMIT, schedules.length);
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return results.sort((a, b) => a.scheduleIndex - b.scheduleIndex);
+}
+
+/**
+ * ============================================================
+ * MULTIPLE SUBMISSIONS
+ * ============================================================
+ */
+
+async function submitMultipleSchedules(
+  formUrl: string,
+  schedules: Record<string, string>[],
+) {
   const overallStartTime = Date.now();
 
-  try {
-    // Launch browser with more resources for parallel processing
-    browser = await puppeteer.launch({
-      headless: true, // Changed to true for headless mode
-      defaultViewport: null,
-      args: [
-        "--start-maximized",
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-software-rasterizer",
-      ],
-    });
+  const browser = await getBrowser();
 
-    console.log(`Processing ${schedules.length} schedule(s) in parallel...`);
+  const results = await processSchedulesWithLimit(browser, formUrl, schedules);
 
-    // Create pages for each schedule
-    const pages = await Promise.all(schedules.map(() => browser.newPage()));
+  const totalTime = Date.now() - overallStartTime;
 
-    // Set up all pages with user agent
-    await Promise.all(
-      pages.map((page) =>
-        page.setUserAgent(
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ),
-      ),
-    );
+  const successCount = results.filter((result) => result.success).length;
 
-    // Process all schedules in parallel
-    const promises = schedules.map((schedule, index) => {
-      return submitSingleScheduleInTab(
-        pages[index],
-        formUrl,
-        schedule,
-        index + 1,
-      );
-    });
+  return {
+    success: successCount === schedules.length,
 
-    // Wait for all schedules to complete
-    const resultsArray = await Promise.all(promises);
-    results.push(...resultsArray);
+    message: `Submitted ${successCount}/${schedules.length} schedules successfully`,
 
-    const totalTime = Date.now() - overallStartTime;
-    const totalTimeFormatted = formatTime(totalTime);
-    const averageTime = totalTime / schedules.length;
-    const averageTimeFormatted = formatTime(averageTime);
+    results,
 
-    const successCount = results.filter((r) => r.success).length;
-    const allSuccess = results.every((r) => r.success);
+    totalTime,
 
-    // Close all pages
-    await Promise.all(pages.map((page) => page.close()));
+    totalTimeFormatted: formatTime(totalTime),
 
-    return {
-      success: allSuccess,
-      message: `Submitted ${successCount}/${schedules.length} schedules successfully in parallel`,
-      results: results.sort((a, b) => a.scheduleIndex - b.scheduleIndex),
-      totalTime: totalTime,
-      totalTimeFormatted: totalTimeFormatted,
-      averageTime: averageTime,
-      averageTimeFormatted: averageTimeFormatted,
-    };
-  } catch (error: any) {
-    console.error("Error processing schedules:", error);
-    const totalTime = Date.now() - overallStartTime;
-    return {
-      success: false,
-      message: `Error processing schedules: ${error.message}`,
-      results: results,
-      totalTime: totalTime,
-      totalTimeFormatted: formatTime(totalTime),
-      averageTime: 0,
-      averageTimeFormatted: "0s",
-    };
-  } finally {
-    if (browser) {
-      console.log("Closing browser...");
-      await browser.close();
-      console.log("Browser closed");
-    }
-  }
+    averageTime: schedules.length > 0 ? totalTime / schedules.length : 0,
+
+    averageTimeFormatted:
+      schedules.length > 0 ? formatTime(totalTime / schedules.length) : "0s",
+  };
 }
 
-async function submitFormWithPuppeteer(
+/**
+ * ============================================================
+ * SINGLE SUBMISSION
+ * ============================================================
+ */
+
+async function submitSingleForm(
   formUrl: string,
   fields: Record<string, string>,
-): Promise<{
-  success: boolean;
-  message?: string;
-  timeTaken: number;
-  timeTakenFormatted: string;
-}> {
-  let browser: any = null;
-  const startTime = Date.now();
+) {
+  const browser = await getBrowser();
+
+  const page = await createOptimizedPage(browser);
 
   try {
-    // Launch browser
-    browser = await puppeteer.launch({
-      headless: true, // Changed to true for headless mode
-      defaultViewport: null,
-      args: [
-        "--start-maximized",
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-      ],
-    });
+    const result = await submitSingleSchedule(page, formUrl, fields, 1);
 
-    const page = await browser.newPage();
-
-    const result = await submitSingleScheduleInTab(page, formUrl, fields, 1);
-
-    await page.close();
-
-    return {
-      success: result.success,
-      message: result.message,
-      timeTaken: result.timeTaken,
-      timeTakenFormatted: result.timeTakenFormatted,
-    };
-  } catch (error: any) {
-    console.error("Puppeteer error:", error);
-    const timeTaken = Date.now() - startTime;
-    return {
-      success: false,
-      message: `Error: ${error.message}`,
-      timeTaken: timeTaken,
-      timeTakenFormatted: formatTime(timeTaken),
-    };
+    return result;
   } finally {
-    if (browser) {
-      console.log("Closing browser...");
-      await browser.close();
-      console.log("Browser closed");
-    }
+    await page.close().catch(() => {});
   }
 }
+
+/**
+ * ============================================================
+ * API ROUTE
+ * ============================================================
+ */
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { formUrl, schedules, fields, action, mode } = body;
 
-    if (!formUrl) {
+    const { formUrl, schedules, fields, action = "prefill" } = body;
+
+    /**
+     * Validate form URL.
+     */
+    if (!formUrl || typeof formUrl !== "string") {
       return NextResponse.json(
-        { error: "Missing formUrl in request body" },
+        {
+          error: "Missing or invalid formUrl",
+        },
         { status: 400 },
       );
     }
 
-    const entryMap = await getEntryIdMap(formUrl);
-    const actionType = action || "prefill";
+    /**
+     * ========================================================
+     * MULTIPLE SCHEDULES
+     * ========================================================
+     */
 
-    // Handle multiple schedules - process in parallel
-    if (schedules && Array.isArray(schedules) && schedules.length > 0) {
-      if (actionType === "submit") {
-        const result = await submitMultipleSchedulesParallel(
-          formUrl,
-          schedules,
+    if (Array.isArray(schedules) && schedules.length > 0) {
+      /**
+       * FAST PREFILL MODE
+       *
+       * No Puppeteer required.
+       */
+      if (action !== "submit") {
+        const entryMap = await getEntryIdMap(formUrl);
+
+        const prefilledUrls = schedules.map((schedule) =>
+          buildPrefilledUrl(formUrl, entryMap, schedule),
         );
 
         return NextResponse.json(
           {
-            message: result.message || "Schedules processed",
-            success: result.success,
-            results: result.results || [],
-            totalTime: result.totalTimeFormatted,
-            averageTime: result.averageTimeFormatted,
-          },
-          { status: result.success ? 200 : 500 },
-        );
-      } else {
-        // Prefill mode for multiple schedules - return prefilled URLs for each
-        const prefilledUrls = schedules.map((scheduleFields) => {
-          return buildPrefilledUrl(formUrl, entryMap, scheduleFields);
-        });
-
-        return NextResponse.json(
-          {
+            success: true,
             message: "Pre-filled URLs created successfully",
+
             prefilledUrls,
+
             mapping: entryMap,
-            schedules: schedules,
+
+            schedules,
           },
-          { status: 201 },
+          { status: 200 },
         );
       }
-    }
 
-    // Handle single schedule (backward compatibility)
-    if (!fields || typeof fields !== "object") {
-      return NextResponse.json(
-        { error: "Missing fields in request body" },
-        { status: 400 },
-      );
-    }
-
-    if (actionType === "submit") {
-      const result = await submitFormWithPuppeteer(formUrl, fields);
+      /**
+       * PUPPETEER SUBMISSION MODE
+       */
+      const result = await submitMultipleSchedules(formUrl, schedules);
 
       return NextResponse.json(
         {
-          message: result.message || "Form submitted successfully",
           success: result.success,
-          timeTaken: result.timeTakenFormatted,
+
+          message: result.message,
+
+          results: result.results,
+
+          totalTime: result.totalTimeFormatted,
+
+          averageTime: result.averageTimeFormatted,
         },
-        { status: result.success ? 200 : 500 },
+        {
+          status: result.success ? 200 : 207,
+        },
       );
-    } else {
+    }
+
+    /**
+     * ========================================================
+     * SINGLE FORM
+     * ========================================================
+     */
+
+    if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+      return NextResponse.json(
+        {
+          error: "Missing or invalid fields",
+        },
+        { status: 400 },
+      );
+    }
+
+    /**
+     * FAST PREFILL MODE
+     */
+    if (action !== "submit") {
+      const entryMap = await getEntryIdMap(formUrl);
+
       const prefilledUrl = buildPrefilledUrl(formUrl, entryMap, fields);
 
       return NextResponse.json(
         {
+          success: true,
+
           message: "Pre-filled URL created successfully",
+
           prefilledUrl,
+
           mapping: entryMap,
-          fields: fields,
+
+          fields,
         },
-        { status: 201 },
+        { status: 200 },
       );
     }
-  } catch (error: any) {
-    console.error("Error in autofill route:", error);
+
+    /**
+     * PUPPETEER SUBMISSION MODE
+     */
+    const result = await submitSingleForm(formUrl, fields);
+
     return NextResponse.json(
-      { error: "Failed to process the form", details: error.message },
+      {
+        success: result.success,
+
+        message: result.message,
+
+        timeTaken: result.timeTakenFormatted,
+      },
+      {
+        status: result.success ? 200 : 500,
+      },
+    );
+  } catch (error: any) {
+    console.error("❌ Error in autofill route:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+
+        error: "Failed to process the form",
+
+        details: error?.message || "Unknown error",
+      },
       { status: 500 },
     );
   }
