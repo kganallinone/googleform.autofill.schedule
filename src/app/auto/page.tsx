@@ -304,7 +304,7 @@ const FieldDetailsModal = ({
                             </div>
                           )}
                       </div>
-                      <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 ml-2" />
+                      <AlertTriangle className="w-5 h-5 text-amber-600  ml-2" />
                     </div>
                   </div>
                 ),
@@ -434,14 +434,12 @@ const FieldDetailsModal = ({
                       </div>
 
                       {isFilled && (
-                        <Check className="w-5 h-5 text-emerald-600 flex-shrink-0" />
+                        <Check className="w-5 h-5 text-emerald-600 " />
                       )}
                       {isSkipped && (
-                        <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                        <AlertTriangle className="w-5 h-5 text-amber-600 " />
                       )}
-                      {isError && (
-                        <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-                      )}
+                      {isError && <XCircle className="w-5 h-5 text-red-600 " />}
                     </div>
                   </div>
                 );
@@ -503,7 +501,7 @@ const Toast = ({
       className={`fixed top-4 right-4 z-50 p-4 rounded-xl border-l-4 shadow-xl max-w-md animate-slide-in backdrop-blur-sm ${bgColor[type]}`}
     >
       <div className="flex items-start gap-3">
-        <SelectedIcon className="w-5 h-5 mt-0.5 flex-shrink-0" />
+        <SelectedIcon className="w-5 h-5 mt-0.5 " />
         <p className="text-sm font-medium">{message}</p>
         <button
           onClick={onClose}
@@ -557,13 +555,13 @@ const PasscodeLock = ({
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center p-4">
+    <div className="min-h-screen  from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center p-4">
       <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-2xl p-8 max-w-md w-full border border-white/20">
         <div className="text-center mb-8">
-          <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+          <div className="w-20 h-20  from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
             <Lock className="w-10 h-10 text-white" />
           </div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+          <h1 className="text-3xl font-bold  from-indigo-600 to-purple-600 bg-clip-text text-transparent">
             Schedule Manager
           </h1>
           <p className="text-gray-500 mt-1">Enter passcode to access</p>
@@ -607,7 +605,7 @@ const PasscodeLock = ({
           <button
             type="submit"
             disabled={isLocked || passcode.length !== 6}
-            className="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl hover:from-indigo-700 hover:to-purple-700 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg hover:shadow-xl"
+            className="w-full py-3  from-indigo-600 to-purple-600 text-white rounded-xl hover:from-indigo-700 hover:to-purple-700 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg hover:shadow-xl"
           >
             <Unlock className="w-5 h-5" />
             Unlock
@@ -634,7 +632,7 @@ const StatsCards = ({ schedules }: { schedules: Schedule[] }) => {
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-      <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 border border-blue-200">
+      <div className=" from-blue-50 to-blue-100 rounded-xl p-4 border border-blue-200">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-blue-600 font-medium">Total Schedules</p>
@@ -647,7 +645,7 @@ const StatsCards = ({ schedules }: { schedules: Schedule[] }) => {
           </div>
         </div>
       </div>
-      <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 rounded-xl p-4 border border-emerald-200">
+      <div className=" from-emerald-50 to-emerald-100 rounded-xl p-4 border border-emerald-200">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-emerald-600 font-medium">Clinicians</p>
@@ -660,7 +658,7 @@ const StatsCards = ({ schedules }: { schedules: Schedule[] }) => {
           </div>
         </div>
       </div>
-      <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-4 border border-purple-200">
+      <div className=" from-purple-50 to-purple-100 rounded-xl p-4 border border-purple-200">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-purple-600 font-medium">Days Covered</p>
@@ -671,7 +669,7 @@ const StatsCards = ({ schedules }: { schedules: Schedule[] }) => {
           </div>
         </div>
       </div>
-      <div className="bg-gradient-to-br from-amber-50 to-amber-100 rounded-xl p-4 border border-amber-200">
+      <div className=" from-amber-50 to-amber-100 rounded-xl p-4 border border-amber-200">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-amber-600 font-medium">Departments</p>
@@ -1153,7 +1151,7 @@ export default function ScheduleManager() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+    <div className="min-h-screen  from-gray-50 to-gray-100">
       <div className="container mx-auto px-4 py-6 max-w-7xl">
         {toast && (
           <Toast
@@ -1176,9 +1174,9 @@ export default function ScheduleManager() {
         <div className="bg-white/80 backdrop-blur-lg rounded-2xl shadow-lg p-6 mb-6 border border-white/20">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
-              <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent flex items-center gap-3">
+              <h1 className="text-3xl font-bold  from-indigo-600 to-purple-600 bg-clip-text text-transparent flex items-center gap-3">
                 <span>📋 Schedule Management</span>
-                <span className="text-sm font-normal bg-gradient-to-r from-indigo-100 to-purple-100 px-3 py-1 rounded-full text-gray-700">
+                <span className="text-sm font-normal  from-indigo-100 to-purple-100 px-3 py-1 rounded-full text-gray-700">
                   {schedules.length} total
                 </span>
               </h1>
@@ -1250,7 +1248,7 @@ export default function ScheduleManager() {
                 <button
                   onClick={handleSubmitToGoogleForm}
                   disabled={isSubmitting || schedules.length === 0}
-                  className="px-6 py-3 bg-gradient-to-r from-emerald-600 to-emerald-700 text-white rounded-xl hover:from-emerald-700 hover:to-emerald-800 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg hover:shadow-xl"
+                  className="px-6 py-3  from-emerald-600 to-emerald-700 text-white rounded-xl hover:from-emerald-700 hover:to-emerald-800 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg hover:shadow-xl"
                 >
                   {isSubmitting ? (
                     <>
@@ -1541,7 +1539,7 @@ export default function ScheduleManager() {
                       onClick={
                         editingId ? handleUpdateSchedule : handleAddSchedule
                       }
-                      className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 transition-all duration-200 flex items-center justify-center gap-2 shadow-lg hover:shadow-xl"
+                      className="flex-1 px-6 py-3  from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 transition-all duration-200 flex items-center justify-center gap-2 shadow-lg hover:shadow-xl"
                     >
                       <Save className="w-5 h-5" />
                       {editingId ? "Update Schedule" : "Add Schedule"}
@@ -1610,7 +1608,7 @@ export default function ScheduleManager() {
                     <button
                       onClick={handleBulkDuplicate}
                       disabled={schedules.length === 0}
-                      className="px-3 py-2 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-xl hover:from-purple-700 hover:to-purple-800 transition-all text-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg"
+                      className="px-3 py-2  from-purple-600 to-purple-700 text-white rounded-xl hover:from-purple-700 hover:to-purple-800 transition-all text-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg"
                     >
                       <Copy className="w-4 h-4" />
                       <span className="hidden sm:inline">Duplicate All</span>
@@ -1705,18 +1703,18 @@ export default function ScheduleManager() {
                               className="hover:bg-gray-50 transition-colors"
                             >
                               <td
-                                className="px-3 py-3 text-sm truncate max-w-[120px]"
+                                className="px-3 py-3 text-sm truncate "
                                 title={schedule.Email}
                               >
                                 {schedule.Email}
                               </td>
                               <td
-                                className="px-3 py-3 text-sm font-medium truncate max-w-[120px]"
+                                className="px-3 py-3 text-sm font-medium truncate "
                                 title={schedule["Name of Clinician"]}
                               >
                                 {schedule["Name of Clinician"]}
                               </td>
-                              <td className="hidden md:table-cell px-3 py-3 text-sm truncate max-w-[80px]">
+                              <td className="hidden md:table-cell px-3 py-3 text-sm truncate ">
                                 {schedule["Student Number"]}
                               </td>
                               <td className="hidden sm:table-cell px-3 py-3 text-sm">
@@ -1724,14 +1722,14 @@ export default function ScheduleManager() {
                                   {schedule["Scheduled Day"]}
                                 </span>
                               </td>
-                              <td className="hidden lg:table-cell px-3 py-3 text-sm truncate max-w-[120px]">
+                              <td className="hidden lg:table-cell px-3 py-3 text-sm truncate ">
                                 {
                                   schedule[
                                     "Shift Schedule ( Saturdays are am pm only, so please use 8-12 and 12-4pm as substitute for 1-5pm)"
                                   ]
                                 }
                               </td>
-                              <td className="hidden xl:table-cell px-3 py-3 text-sm truncate max-w-[100px]">
+                              <td className="hidden xl:table-cell px-3 py-3 text-sm truncate ">
                                 <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-medium">
                                   {schedule["Department / Procedure to do"]}
                                 </span>
@@ -1813,7 +1811,7 @@ export default function ScheduleManager() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
+              <div className="space-y-3 overflow-y-auto">
                 {activityLogs.map((log) => (
                   <div
                     key={log.id}
@@ -1936,7 +1934,7 @@ export default function ScheduleManager() {
                                       #{item.scheduleIndex}
                                     </td>
                                     <td
-                                      className="px-2 py-1 max-w-[100px] truncate"
+                                      className="px-2 py-1  truncate"
                                       title={item.clinicianName}
                                     >
                                       {item.clinicianName}
